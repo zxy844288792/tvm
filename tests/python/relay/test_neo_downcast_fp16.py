@@ -37,7 +37,7 @@ def test_downcast_fp16_resnet():
     rt.set_input(**params)
     rt_fp16 = tvm.contrib.graph_runtime.create(graph_fp16, lib_fp16, tvm.cpu())
     rt_fp16.set_input(**params_fp16)
-    for i in range(1000):
+    for i in range(100):
         X = tvm.nd.array(np.random.random_sample(image_shape).astype('float32'))
         rt.set_input('data', X)
         rt_fp16.set_input('data', X)
