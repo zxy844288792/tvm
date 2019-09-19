@@ -55,6 +55,7 @@ from . import image
 from . import frontend
 from . import backend
 from . import quantize
+from . import neo
 
 # Dialects
 from . import qnn
