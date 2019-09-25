@@ -1,4 +1,3 @@
-
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -1604,7 +1603,7 @@ class RecurrentNetworks(object):
 
 # An internal list to contain all the control flow primitives used in Tensorflow
 # 1.x.
-_control_flow_nodes = ['Merge', 'Switch', 'NextIteration', 'Exit', 'Enter', 'LoopCond']
+_control_flow_nodes = ['Merge', 'Switch', 'NextIteration', 'Exit', 'Enter', 'LoopCond', 'Assert', 'NoOp']
 
 class RewriteSubgraph(ExprMutator):
     """
@@ -2242,6 +2241,8 @@ class GraphProto(object):
         op : tvm.relay.Expr
             Converted relay expression.
         """
+        print(node.op)
+        print(self._nodes)
         node_name_prefix = node.name.rsplit('/', 1)[0]
         if node.op == "Merge":
             if _in_while_loop(control_flow_node_map, node_name_prefix):
@@ -2293,6 +2294,11 @@ class GraphProto(object):
             op = self._nodes[node.input[0]]
             assert len(op) == 1
             self._loops[node_name_prefix].body.append(op[0])
+        elif node.op == "Assert":
+            print(node)
+            op = self._nodes[node.input[0]]
+        elif node.op == "NoOp":
+            op = self._nodes["".join(node.input[0].split('^'))]
         else:
             raise Exception("Cannot identify control flow operator: " +
                             "{}".format(node.op))
