@@ -21,6 +21,7 @@ import tvm
 from tvm import relay
 from tvm.relay import transform
 from tvm.relay.testing import ctx_list
+from tvm.contrib.nvcc import have_fp16
 import topi.testing
 
 def run_infer_type(expr):
@@ -43,6 +44,19 @@ def test_conv2d_infer_type():
         (n, 2, 224, 224), "float32")
     assert yy.args[1].checked_type == relay.TensorType(
         (2, 10, 3, 3), "float32")
+
+    n, c, h, w = tvm.var("n"), 10, 224, 224
+    x = relay.var("x", relay.ty.TensorType((n, c, h, w), "float16"))
+    w = relay.var("w", dtype='float16')
+    y = relay.nn.conv2d(x, w,
+                        kernel_size=(3, 3),
+                        padding=(1, 1),
+                        channels=2)
+    yy = run_infer_type(y)
+    assert yy.checked_type ==  relay.TensorType(
+        (n, 2, 224, 224), "float16")
+    assert yy.args[1].checked_type == relay.TensorType(
+        (2, 10, 3, 3), "float16")
 
     # infer by shape of w, mixed precision
     n, c, h, w = tvm.var("n"), 10, 224, 224
@@ -106,7 +120,8 @@ def test_conv2d_run():
                         **attrs):
         if except_targets is None:
             except_targets = []
-
+        rtol = 1e-2 if dtype is 'float16' else 1e-5
+        atol = 1e-2 if dtype is 'float16' else 1e-5
         x = relay.var("x", shape=dshape, dtype=dtype)
         w = relay.var("w", dtype=dtype)
         y = relay.nn.conv2d(x, w,
@@ -129,9 +144,11 @@ def test_conv2d_run():
         for target, ctx in ctx_list():
             if target in except_targets:
                 continue
+            if dtype ==  'float16' and target == 'cuda' and not have_fp16(tvm.gpu(0).compute_version):
+                continue 
             intrp1 = relay.create_executor("graph", ctx=ctx, target=target)
             op_res1 = intrp1.evaluate(func)(data, kernel)
-            tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=1e-5, atol=1e-5)
+            tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=rtol, atol=atol)
 
     # depthwise conv2d
     dshape = (1, 32, 18, 18)
@@ -161,6 +178,11 @@ def test_conv2d_run():
     kshape = (10, 3, 3, 3)
     run_test_conv2d("float32", "float32", 1, dshape, kshape,
                     padding=(1, 1), channels=10, kernel_size=(3 ,3))
+    # fp16 normal conv2d
+    dshape = (1, 3, 224, 224)
+    kshape = (10, 3, 3, 3)
+    run_test_conv2d("float16", "float16", 1, dshape, kshape,
+                    padding=(1, 1), channels=10, kernel_size=(3 ,3))
     # mixed precision
     run_test_conv2d("int8", "int32", 1, dshape, kshape,
                     padding=(1, 1), channels=10, kernel_size=(3 ,3))
@@ -176,93 +198,103 @@ def test_conv2d_run():
 
 
 def test_conv2d_transpose_infer_type():
-    # symbolic in batch dimension
-    n, c, h, w = tvm.var("n"), 10, 10, 12
-    x = relay.var("x", relay.TensorType((n, c, h, w), "float32"))
-    w = relay.var("w", relay.IncompleteType())
-    y = relay.nn.conv2d_transpose(x, w,
-                                  kernel_size=(3, 3),
-                                  padding=(1, 1),
-                                  channels=15)
-    assert "channels=15" in y.astext()
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType(
-        (n, 15, 10, 12), "float32")
-    assert yy.args[1].checked_type == relay.TensorType(
-        (10, 15, 3, 3), "float32")
+    for dtype in ['float16', 'float32']:
+        # symbolic in batch dimension
+        n, c, h, w = tvm.var("n"), 10, 10, 12
+        x = relay.var("x", relay.TensorType((n, c, h, w), dtype))
+        w = relay.var("w", relay.IncompleteType())
+        y = relay.nn.conv2d_transpose(x, w,
+                                      kernel_size=(3, 3),
+                                      padding=(1, 1),
+                                      channels=15)
+        assert "channels=15" in y.astext()
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType(
+            (n, 15, 10, 12), dtype)
+        assert yy.args[1].checked_type == relay.TensorType(
+            (10, 15, 3, 3), dtype)
 
-    # infer by shape of w, mixed precision
-    n, c, h, w = tvm.var("n"), 10, 10, 12
-    x = relay.var("x", relay.TensorType((n, c, h, w), "float32"))
-    w = relay.var("w", relay.TensorType((12, 11, 5, 5), "float32"))
-    y = relay.nn.conv2d_transpose(x, w,
-                                  output_padding=(1, 1),
-                                  channels=11,
-                                  data_layout="NHWC")
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType(
-        (n, 15, 15, 11), "float32")
+        # infer by shape of w, mixed precision
+        n, c, h, w = tvm.var("n"), 10, 10, 12
+        x = relay.var("x", relay.TensorType((n, c, h, w), dtype))
+        w = relay.var("w", relay.TensorType((12, 11, 5, 5), dtype))
+        y = relay.nn.conv2d_transpose(x, w,
+                                      output_padding=(1, 1),
+                                      channels=11,
+                                      data_layout="NHWC")
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType(
+            (n, 15, 15, 11), dtype)
 
 
 def test_conv2d_transpose_run():
-    dshape = (1, 3, 18, 18)
-    kshape = (3, 10, 3, 3)
-    oshape = (1, 10, 37, 37)
-    x = relay.var("x", shape=dshape)
-    w = relay.var("w")
-    y = relay.nn.conv2d_transpose(x, w,
-                                  channels=10, kernel_size=(3,3), strides=(2,2),
-                                  padding=(1,1), output_padding=(2, 2))
-    func = relay.Function([x, w], y)
-    dtype = "float32"
-    data = np.random.uniform(size=dshape).astype(dtype)
-    kernel = np.random.uniform(size=kshape).astype(dtype)
-    c_np = topi.testing.conv2d_transpose_nchw_python(
-        data, kernel, 2, 1)
-    d_np = np.zeros(shape=oshape)
-    d_np[:,:,0:c_np.shape[2],0:c_np.shape[3]] = c_np
-    ref_res = d_np
+    for dtype in ['float16', 'float32']:
+        rtol = 1e-2 if dtype is 'float16' else 1e-5
+        atol = 1e-2 if dtype is 'float16' else 1e-5
+        dshape = (1, 3, 18, 18)
+        kshape = (3, 10, 3, 3)
+        oshape = (1, 10, 37, 37)
+        x = relay.var("x", shape=dshape, dtype=dtype)
+        w = relay.var("w", dtype=dtype)
+        y = relay.nn.conv2d_transpose(x, w,
+                                      channels=10, kernel_size=(3,3), strides=(2,2),
+                                      padding=(1,1), output_padding=(2, 2))
+        func = relay.Function([x, w], y)
+        data = np.random.uniform(size=dshape).astype(dtype)
+        kernel = np.random.uniform(size=kshape).astype(dtype)
+        c_np = topi.testing.conv2d_transpose_nchw_python(
+            data, kernel, 2, 1)
+        d_np = np.zeros(shape=oshape)
+        d_np[:,:,0:c_np.shape[2],0:c_np.shape[3]] = c_np
+        ref_res = d_np
 
-    for target, ctx in ctx_list():
-        intrp1 = relay.create_executor("graph", ctx=ctx, target=target)
-        op_res1 = intrp1.evaluate(func)(data, kernel)
-        tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=1e-5, atol=1e-5)
+        for target, ctx in ctx_list():
+            if dtype ==  'float16' and target == 'cuda' and not have_fp16(tvm.gpu(0).compute_version):
+                continue
+            intrp1 = relay.create_executor("graph", ctx=ctx, target=target)
+            op_res1 = intrp1.evaluate(func)(data, kernel)
+            tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=rtol, atol=atol)
 
 
 
 def test_upsampling_infer_type():
-    n, c , h, w = tvm.var("n"), tvm.var("c"), tvm.var("h"), tvm.var("w")
-    x = relay.var("x", relay.TensorType((n, c, h, w), "float32"))
-    y = relay.nn.upsampling(x, scale=2, layout="NCHW", method="bilinear")
-    "method=\"BINLINEAR\"" in y.astext()
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType((n, c, h*2, w*2), "float32")
-    n, c = tvm.var("n"), tvm.var("c")
-    x = relay.var("x", relay.TensorType((n, c, 100, 200), "float32"))
-    y = relay.nn.upsampling(x, scale=2, layout="NCHW", method="bilinear")
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType((n, c, 200, 400), "float32")
+    for dtype in ['float16', 'float32']:
+        n, c , h, w = tvm.var("n"), tvm.var("c"), tvm.var("h"), tvm.var("w")
+        x = relay.var("x", relay.TensorType((n, c, h, w), dtype))
+        y = relay.nn.upsampling(x, scale=2, layout="NCHW", method="bilinear")
+        "method=\"BINLINEAR\"" in y.astext()
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType((n, c, h*2, w*2), dtype)
+        n, c = tvm.var("n"), tvm.var("c")
+        x = relay.var("x", relay.TensorType((n, c, 100, 200), dtype))
+        y = relay.nn.upsampling(x, scale=2, layout="NCHW", method="bilinear")
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType((n, c, 200, 400), dtype)
 
 
 def _test_pool2d(opfunc, reffunc):
-    n, c, h, w = tvm.var("n"), 10, 224, 224
-    x = relay.var("x", relay.TensorType((n, c, h, w), "float32"))
-    y = opfunc(x, pool_size=(1, 1))
-    assert "pool_size=" in y.astext()
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType((n, 10, 224, 224), "float32")
-    # test execution
-    dtype = "float32"
-    dshape = (1, 3, 28, 28)
-    x = relay.var("x", shape=dshape)
-    y = opfunc(x, pool_size=(2, 2), strides=(2, 2), padding=(0, 0))
-    func = relay.Function([x], y)
-    data = np.random.uniform(size=dshape).astype(dtype)
-    ref_res = reffunc(data.reshape(1,3,14,2,14,2), axis=(3,5))
-    for target, ctx in ctx_list():
-        intrp1 = relay.create_executor("graph", ctx=ctx, target=target)
-        op_res1 = intrp1.evaluate(func)(data)
-        tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=1e-5, atol=1e-5)
+    for dtype in ['float16', 'float32']:
+        rtol = 1e-2 if dtype is 'float16' else 1e-5
+        atol = 1e-2 if dtype is 'float16' else 1e-5
+        n, c, h, w = tvm.var("n"), 10, 224, 224
+        x = relay.var("x", relay.TensorType((n, c, h, w), dtype))
+        y = opfunc(x, pool_size=(1, 1))
+        assert "pool_size=" in y.astext()
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType((n, 10, 224, 224), dtype)
+        # test execution
+        dshape = (1, 3, 28, 28)
+        x = relay.var("x", shape=dshape)
+        y = opfunc(x, pool_size=(2, 2), strides=(2, 2), padding=(0, 0))
+        func = relay.Function([x], y)
+        data = np.random.uniform(size=dshape).astype(dtype)
+        ref_res = reffunc(data.reshape(1,3,14,2,14,2), axis=(3,5))
+        for target, ctx in ctx_list():
+            if dtype ==  'float16' and target == 'cuda' and not have_fp16(tvm.gpu(0).compute_version):
+                continue
+            intrp1 = relay.create_executor("graph", ctx=ctx, target=target)
+            op_res1 = intrp1.evaluate(func)(data)
+            tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=rtol, atol=atol)
 
 def _test_pool2d_int(opfunc, reffunc, dtype):
     n, c, h, w = tvm.var("n"), 10, 224, 224
@@ -320,90 +352,97 @@ def test_pool2d():
 
 
 def test_avg_pool2d_no_count_pad():
-    kh, kw = (4, 4)
-    sh, sw = (2, 2)
-    ph, pw = (2, 2)
-    n = 1
-    (ic, ih, iw) = (3, 28, 28)
-    (oc, oh, ow) = (3, 15, 15)
-    dshape = (n, ic, ih, iw)
-    x = relay.var("x", shape=dshape)
-    y = relay.nn.avg_pool2d(x,
-                            pool_size=(kh, kw),
-                            strides=(sw, sw),
-                            padding=(ph, pw),
-                            count_include_pad=False)
-    func = relay.Function([x], y)
-    dtype = "float32"
-    a_np = np.random.uniform(low=0.001, size=(n, ic, ih, iw)).astype(dtype)
-    pad_np = np.zeros(shape=(n, ic, ih+2*ph, iw+2*pw)).astype(dtype)
-    no_zero = (range(n), range(ic), (range(ph, ih+ph)), (range(pw, iw+pw)))
-    pad_np[np.ix_(*no_zero)] = a_np
-    b_np = np.zeros(shape=(n, oc, oh, ow)).astype(dtype)
-    for i in range(oh):
-        for j in range(ow):
-            pad_count = np.sum(pad_np[:, :, i*sh:i*sh+kh, j*sw:j*sw+kw] > 0, axis=(2,3))
-            b_np[:,:,i,j] = np.sum(pad_np[:, :, i*sh:i*sh+kh, j*sw:j*sw+kw],
-                                   axis=(2,3)) / np.maximum(pad_count, 1)
-    ref_res = np.maximum(b_np, 0.0)
-    data = a_np
+    for dtype in ['float16', 'float32']:
+        rtol = 1e-2 if dtype is 'float16' else 1e-5
+        atol = 1e-2 if dtype is 'float16' else 1e-5
+        kh, kw = (4, 4)
+        sh, sw = (2, 2)
+        ph, pw = (2, 2)
+        n = 1
+        (ic, ih, iw) = (3, 28, 28)
+        (oc, oh, ow) = (3, 15, 15)
+        dshape = (n, ic, ih, iw)
+        x = relay.var("x", shape=dshape, dtype=dtype)
+        y = relay.nn.avg_pool2d(x,
+                                pool_size=(kh, kw),
+                                strides=(sw, sw),
+                                padding=(ph, pw),
+                                count_include_pad=False)
+        func = relay.Function([x], y)
+        a_np = np.random.uniform(low=0.001, size=(n, ic, ih, iw)).astype(dtype)
+        pad_np = np.zeros(shape=(n, ic, ih+2*ph, iw+2*pw)).astype(dtype)
+        no_zero = (range(n), range(ic), (range(ph, ih+ph)), (range(pw, iw+pw)))
+        pad_np[np.ix_(*no_zero)] = a_np
+        b_np = np.zeros(shape=(n, oc, oh, ow)).astype(dtype)
+        for i in range(oh):
+            for j in range(ow):
+                pad_count = np.sum(pad_np[:, :, i*sh:i*sh+kh, j*sw:j*sw+kw] > 0, axis=(2,3))
+                b_np[:,:,i,j] = np.sum(pad_np[:, :, i*sh:i*sh+kh, j*sw:j*sw+kw],
+                                       axis=(2,3)) / np.maximum(pad_count, 1)
+        ref_res = np.maximum(b_np, 0.0)
+        data = a_np
 
-    for target, ctx in ctx_list():
-        intrp1 = relay.create_executor("graph", ctx=ctx, target=target)
-        op_res1 = intrp1.evaluate(func)(data)
-        tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=1e-5, atol=1e-5)
+        for target, ctx in ctx_list():
+            if dtype ==  'float16' and target == 'cuda' and not have_fp16(tvm.gpu(0).compute_version):
+                continue
+            intrp1 = relay.create_executor("graph", ctx=ctx, target=target)
+            op_res1 = intrp1.evaluate(func)(data)
+            tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=rtol, atol=atol)
 
 def test_flatten_infer_type():
-    d1, d2, d3, d4 = tvm.var("d1"), tvm.var("d2"), tvm.var("d3"), tvm.var("d4")
-    x = relay.var("x", relay.TensorType((d1, d2, d3, d4), "float32"))
-    y = relay.nn.batch_flatten(x)
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType((d1, ((d2*d3)*d4)), "float32")
+    for dtype in ['float16', 'float32']:
+        d1, d2, d3, d4 = tvm.var("d1"), tvm.var("d2"), tvm.var("d3"), tvm.var("d4")
+        x = relay.var("x", relay.TensorType((d1, d2, d3, d4), dtype))
+        y = relay.nn.batch_flatten(x)
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType((d1, ((d2*d3)*d4)), dtype)
 
-    x = relay.var("x", relay.TensorType((3, 2, 4, 3), "float32"))
-    y = relay.nn.batch_flatten(x)
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType((3, 24), "float32")
+        x = relay.var("x", relay.TensorType((3, 2, 4, 3), dtype))
+        y = relay.nn.batch_flatten(x)
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType((3, 24), dtype)
 
-    x = relay.var("x", relay.TensorType((d1, 2, d3, 3), "float32"))
-    y = relay.nn.batch_flatten(x)
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType((d1, ((2*d3)*3)), "float32")
+        x = relay.var("x", relay.TensorType((d1, 2, d3, 3), dtype))
+        y = relay.nn.batch_flatten(x)
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType((d1, ((2*d3)*3)), dtype)
 
-    shape = (1, 5, 10, 10)
-    o_shape = (1, 500)
-    dtype = "float32"
-    x = relay.var("x", relay.TensorType(shape, dtype))
-    z = relay.nn.batch_flatten(x)
-    yy = run_infer_type(z)
-    assert yy.checked_type == relay.TensorType(o_shape, dtype)
-    func = relay.Function([x], z)
-    x_data = np.random.uniform(low=-1, high=1, size=shape).astype(dtype)
-    ref_res = x_data.flatten().reshape(o_shape)
+        shape = (1, 5, 10, 10)
+        o_shape = (1, 500)
+        x = relay.var("x", relay.TensorType(shape, dtype))
+        z = relay.nn.batch_flatten(x)
+        yy = run_infer_type(z)
+        assert yy.checked_type == relay.TensorType(o_shape, dtype)
+        func = relay.Function([x], z)
+        x_data = np.random.uniform(low=-1, high=1, size=shape).astype(dtype)
+        ref_res = x_data.flatten().reshape(o_shape)
 
-    for target, ctx in ctx_list():
-        intrp1 = relay.create_executor("graph", ctx=ctx, target=target)
-        intrp2 = relay.create_executor("debug", ctx=ctx, target=target)
-        op_res1 = intrp1.evaluate(func)(x_data)
-        tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=1e-5)
-        op_res2 = intrp2.evaluate(func)(x_data)
-        tvm.testing.assert_allclose(op_res2.asnumpy(), ref_res, rtol=1e-5)
+        for target, ctx in ctx_list():
+            if dtype ==  'float16' and target == 'cuda' and not have_fp16(tvm.gpu(0).compute_version):
+                continue
+            intrp1 = relay.create_executor("graph", ctx=ctx, target=target)
+            intrp2 = relay.create_executor("debug", ctx=ctx, target=target)
+            op_res1 = intrp1.evaluate(func)(x_data)
+            tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=1e-5)
+            op_res2 = intrp2.evaluate(func)(x_data)
+            tvm.testing.assert_allclose(op_res2.asnumpy(), ref_res, rtol=1e-5)
 
 def test_pad_infer_type():
-    # entirely concrete case
-    n, c, h, w = 1, 2, 3, 4
-    t = relay.var("t", relay.TensorType((n, c, h, w), "float32"))
-    y = relay.nn.pad(t, ((1, 1), (2, 2), (3, 3), (4, 4)))
-    "pad_width=" in y.astext()
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType((3, 6, 9, 12), "float32")
+    for dtype in ['float16', 'float32']:
+        # entirely concrete case
+        n, c, h, w = 1, 2, 3, 4
+        t = relay.var("t", relay.TensorType((n, c, h, w), dtype))
+        y = relay.nn.pad(t, ((1, 1), (2, 2), (3, 3), (4, 4)))
+        "pad_width=" in y.astext()
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType((3, 6, 9, 12), dtype)
 
-    # some symbolic values
-    n, c, h, w = tvm.var("n"), 2, 3, tvm.var("w")
-    t = relay.var("t", relay.TensorType((n, c, h, w), "float32"))
-    y = relay.nn.pad(t, ((1, 1), (2, 2), (3, 3), (4, 4)))
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType((n + 2, 6, 9, w + 8), "float32")
+        # some symbolic values
+        n, c, h, w = tvm.var("n"), 2, 3, tvm.var("w")
+        t = relay.var("t", relay.TensorType((n, c, h, w), dtype))
+        y = relay.nn.pad(t, ((1, 1), (2, 2), (3, 3), (4, 4)))
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType((n + 2, 6, 9, w + 8), dtype)
 
 def test_pad_run():
     def _test_run(dtype):
@@ -414,14 +453,18 @@ def test_pad_run():
         data = np.random.uniform(size=dshape).astype(dtype)
         ref_res = np.pad(data, ((1, 1), (2, 2), (3, 3), (4, 4)), 'constant')
         for target, ctx in ctx_list():
+            if dtype ==  'float16' and target == 'cuda' and not have_fp16(tvm.gpu(0).compute_version):
+                continue
             intrp1 = relay.create_executor("graph", ctx=ctx, target=target)
             op_res1 = intrp1.evaluate(func)(data)
             tvm.testing.assert_allclose(op_res1.asnumpy(), ref_res, rtol=1e-5, atol=1e-5)
 
     _test_run('float32')
     _test_run('int32')
+    _test_run('float16')
 
 def test_lrn():
+    # TODO add fp16 test
     n, c , h, w = tvm.var("n"), tvm.var("c"), tvm.var("h"), tvm.var("w")
     x = relay.var("x", shape=(n, c , h, w))
     y = relay.nn.lrn(x, size=10, axis=2, bias=0.5, alpha=.00001, beta=0.75)
@@ -453,6 +496,7 @@ def test_lrn():
         tvm.testing.assert_allclose(op_res2.asnumpy(), ref_res, rtol=1e-5)
 
 def test_l2_normalize():
+    # TODO add fp16 test
     n, c , h, w = tvm.var("n"), tvm.var("c"), tvm.var("h"), tvm.var("w")
     x = relay.var("x", shape=(n, c , h, w))
     y = relay.nn.l2_normalize(x, eps=0.001, axis=[1])
@@ -490,47 +534,54 @@ def batch_flatten(data):
 
 
 def test_batch_flatten():
-    t1 = relay.TensorType((5, 10, 5))
-    x = relay.Var("x", t1)
-    func = relay.Function([x], relay.nn.batch_flatten(x))
+    for dtype in ['float16', 'float32']:
+        t1 = relay.TensorType((5, 10, 5), dtype)
+        x = relay.Var("x", t1)
+        func = relay.Function([x], relay.nn.batch_flatten(x))
 
-    data = np.random.rand(5, 10, 5).astype(t1.dtype)
-    ref_res = batch_flatten(data)
-    for target, ctx in ctx_list():
-        intrp = relay.create_executor("graph", ctx=ctx, target=target)
-        op_res = intrp.evaluate(func)(data)
-        np.testing.assert_allclose(op_res.asnumpy(), ref_res, rtol=0.01)
+        data = np.random.rand(5, 10, 5).astype(t1.dtype)
+        ref_res = batch_flatten(data)
+        for target, ctx in ctx_list():
+            if dtype ==  'float16' and target == 'cuda' and not have_fp16(tvm.gpu(0).compute_version):
+                continue
+            intrp = relay.create_executor("graph", ctx=ctx, target=target)
+            op_res = intrp.evaluate(func)(data)
+            np.testing.assert_allclose(op_res.asnumpy(), ref_res, rtol=0.01)
 
 
 def _test_upsampling(layout, method, align_corners=False):
-    n, c, h, w = tvm.var("n"), 16, 32, 32
-    scale = 2
-    dtype = "float32"
-    def get_shape():
-        if layout == "NCHW":
-            return (c, h, w), (c, h*scale, w*scale)
+    for dtype in ['float16', 'float32']:
+        rtol = 1e-2 if dtype is 'float16' else 1e-5
+        atol = 1e-2 if dtype is 'float16' else 1e-5
+        n, c, h, w = tvm.var("n"), 16, 32, 32
+        scale = 2
+        def get_shape():
+            if layout == "NCHW":
+                return (c, h, w), (c, h*scale, w*scale)
+            else:
+                return (h, w, c), (h*scale, w*scale, c)
+        ishape, oshape = get_shape()
+        x = relay.var("x", relay.TensorType((n,) + ishape, dtype))
+        y = relay.nn.upsampling(x, scale=scale, layout=layout,
+                                method=method, align_corners=align_corners)
+        yy = run_infer_type(y)
+        assert yy.checked_type == relay.TensorType((n,) + oshape, dtype)
+        dshape = (1,) + ishape
+        x = relay.var("x", shape=dshape)
+        y = relay.nn.upsampling(x, scale=scale, layout=layout,
+                                method=method, align_corners=align_corners)
+        func = relay.Function([x], y)
+        data = np.random.uniform(size=dshape).astype(dtype)
+        if method == "nearest_neighbor":
+            ref = topi.testing.upsampling_python(data, (scale, scale), layout)
         else:
-            return (h, w, c), (h*scale, w*scale, c)
-    ishape, oshape = get_shape()
-    x = relay.var("x", relay.TensorType((n,) + ishape, dtype))
-    y = relay.nn.upsampling(x, scale=scale, layout=layout,
-                            method=method, align_corners=align_corners)
-    yy = run_infer_type(y)
-    assert yy.checked_type == relay.TensorType((n,) + oshape, dtype)
-    dshape = (1,) + ishape
-    x = relay.var("x", shape=dshape)
-    y = relay.nn.upsampling(x, scale=scale, layout=layout,
-                            method=method, align_corners=align_corners)
-    func = relay.Function([x], y)
-    data = np.random.uniform(size=dshape).astype(dtype)
-    if method == "nearest_neighbor":
-        ref = topi.testing.upsampling_python(data, (scale, scale), layout)
-    else:
-        ref = topi.testing.bilinear_resize_python(data, (h*scale, w*scale), layout)
-    for target, ctx in ctx_list():
-        executor = relay.create_executor("graph", ctx=ctx, target=target)
-        out = executor.evaluate(func)(data)
-        tvm.testing.assert_allclose(out.asnumpy(), ref, rtol=1e-5, atol=1e-5)
+            ref = topi.testing.bilinear_resize_python(data, (h*scale, w*scale), layout)
+        for target, ctx in ctx_list():
+            if dtype ==  'float16' and target == 'cuda' and not have_fp16(tvm.gpu(0).compute_version):
+                continue
+            executor = relay.create_executor("graph", ctx=ctx, target=target)
+            out = executor.evaluate(func)(data)
+            tvm.testing.assert_allclose(out.asnumpy(), ref, rtol=rtol, atol=atol)
 
 
 def test_upsampling():
