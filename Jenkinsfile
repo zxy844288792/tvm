@@ -64,7 +64,7 @@ docker_run = 'docker/bash.sh'
 // timeout in minutes
 max_time = 120
 
-workspace = 'workspace/exec_${EXECUTOR_NUMBER}'
+workspace = "workspace/exec_${env.EXECUTOR_NUMBER}"
 
 // initialize source codes
 def init_git() {
@@ -88,7 +88,7 @@ def init_git_win() {
 stage("Sanity Check") {
   timeout(time: max_time, unit: 'MINUTES') {
     node('CPU') {
-      ws('${workspace}/tvm/sanity') {
+      ws("${workspace}/tvm/sanity") {
         init_git()
         sh "${docker_run} ${ci_lint}  ./tests/scripts/task_lint.sh"
       }
@@ -136,7 +136,7 @@ def unpack_lib(name, libs) {
 stage('Build') {
   parallel 'BUILD: GPU': {
     node('GPUBUILD') {
-      ws('${workspace}/tvm/build-gpu') {
+      ws("${workspace}/tvm/build-gpu") {
         init_git()
         sh """
            mkdir -p build
@@ -184,7 +184,7 @@ stage('Build') {
   },
   'BUILD: CPU': {
     node('CPU') {
-      ws('${workspace}/tvm/build-cpu') {
+      ws("${workspace}/tvm/build-cpu") {
         init_git()
         sh """
            mkdir -p build
@@ -215,7 +215,7 @@ stage('Build') {
   },
   'BUILD : i386': {
     node('CPU') {
-      ws('${workspace}/tvm/build-i386') {
+      ws("${workspace}/tvm/build-i386") {
         init_git()
         sh """
            mkdir -p build
@@ -240,7 +240,7 @@ stage('Build') {
 stage('Unit Test') {
   parallel 'python3: GPU': {
     node('TensorCore') {
-      ws('${workspace}/tvm/ut-python-gpu') {
+      ws("${workspace}/tvm/ut-python-gpu") {
         init_git()
         unpack_lib('gpu', tvm_multilib)
         timeout(time: max_time, unit: 'MINUTES') {
@@ -252,7 +252,7 @@ stage('Unit Test') {
   },
   'python3: i386': {
     node('CPU') {
-      ws('${workspace}/tvm/ut-python-i386') {
+      ws("${workspace}/tvm/ut-python-i386") {
         init_git()
         unpack_lib('i386', tvm_multilib)
         timeout(time: max_time, unit: 'MINUTES') {
@@ -265,7 +265,7 @@ stage('Unit Test') {
   },
   'java: GPU': {
     node('GPU') {
-      ws('${workspace}/tvm/ut-java') {
+      ws("${workspace}/tvm/ut-java") {
         init_git()
         unpack_lib('gpu', tvm_multilib)
         timeout(time: max_time, unit: 'MINUTES') {
@@ -279,7 +279,7 @@ stage('Unit Test') {
 stage('Integration Test') {
   parallel 'topi: GPU': {
     node('GPU') {
-      ws('${workspace}/tvm/topi-python-gpu') {
+      ws("${workspace}/tvm/topi-python-gpu") {
         init_git()
         unpack_lib('gpu', tvm_multilib)
         timeout(time: max_time, unit: 'MINUTES') {
@@ -290,7 +290,7 @@ stage('Integration Test') {
   },
   'frontend: GPU': {
     node('GPU') {
-      ws('${workspace}/tvm/frontend-python-gpu') {
+      ws("${workspace}/tvm/frontend-python-gpu") {
         init_git()
         unpack_lib('gpu', tvm_multilib)
         timeout(time: max_time, unit: 'MINUTES') {
@@ -301,7 +301,7 @@ stage('Integration Test') {
   },
   'legacy: GPU': {
     node('GPU') {
-      ws('${workspace}/tvm/legacy-python-gpu') {
+      ws("${workspace}/tvm/legacy-python-gpu") {
         init_git()
         unpack_lib('gpu', tvm_multilib)
         timeout(time: max_time, unit: 'MINUTES') {
